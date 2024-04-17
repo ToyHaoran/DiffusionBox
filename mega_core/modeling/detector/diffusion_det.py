@@ -64,13 +64,6 @@ def cosine_beta_schedule(timesteps, s=0.008):
     return torch.clip(betas, 0, 0.999)
 
 
-# ========================================
-# Modified by Shoufa Chen
-# ========================================
-# Modified by Peize Sun, Rufeng Zhang
-# Contact: {sunpeize, cxrfzhang}@foxmail.com
-#
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 #from detectron2.config import CfgNode as CN
 from yacs.config import CfgNode as CN
 
@@ -402,6 +395,7 @@ class DiffusionDet(nn.Module):
             self.local_img_queue = []
             self.head.proposal_feats_global = [None, None]
             self.head.proposal_feats_local = [None, None]
+            # 使用 deque 存储特征、类别和提议框，初始化
             self.feats = deque(maxlen=self.all_frame_interval)
             self.classes_300 = deque(maxlen=self.all_frame_interval)
             self.proposals_init_300 = deque(maxlen=self.all_frame_interval)
@@ -412,74 +406,86 @@ class DiffusionDet(nn.Module):
             self.proposals_feat_dis = deque(maxlen=self.all_frame_interval)
             self.proposals_feat_300 = deque(maxlen=self.all_frame_interval)
 
-        # get frame info
-        self.frame_id = infos["frame_id"]  # dir id of the current frame
-        self.start_id = infos["start_id"]  # dir id of the first frame of video
-        self.end_id = infos["end_id"]  # dir id of the last frame of video
-        self.seg_len = infos["seg_len"]  # total video length
-        self.last_queue_id = infos["last_queue_id"]  # dir id of the last frame of queue
-
+        # 获取帧信息
+        self.frame_id = infos["frame_id"]  # 当前帧的目录 ID
+        self.start_id = infos["start_id"]   # 视频第一帧的目录 ID
+        self.end_id = infos["end_id"]  # 视频最后一帧的目录 ID
+        self.seg_len = infos["seg_len"]  # 视频总长度
+        self.last_queue_id = infos["last_queue_id"]  # 队列中最后一帧的目录 ID
+        # 这里批处理大小为8,如果当前帧 ID 不是批处理大小的倍数，则将参考图像添加到队列并返回空列表。
         if self.frame_id % self.infer_batch != 0:
             self.local_img_queue += infos["ref_l"]
             return []
-        else:
+        else:  # 否则，将队列中的图像与当前帧的参考图像合并，并清空本地图像队列。
             infos["ref_l"] = self.local_img_queue + infos["ref_l"]
             self.local_img_queue = []
 
         # 1. extract features  提取特征
         if infos["ref_l"] or infos["ref_g"]:
-            local_imgs = [img.tensors for img in infos["ref_l"]]
-            global_imgs = [img.tensors for img in infos["ref_g"]]
-            total_imgs_tensor = torch.cat(local_imgs + global_imgs)
+            local_imgs = [img.tensors for img in infos["ref_l"]]  # 8个 (1,3,576,1024)
+            global_imgs = [img.tensors for img in infos["ref_g"]]  # 24个 同上
+            total_imgs_tensor = torch.cat(local_imgs + global_imgs)  # 32个
             total_imgs_tensor = self.normalizer(total_imgs_tensor)
-            batch_split = self.infer_batch
-            total_imgs_splits = total_imgs_tensor.split(batch_split)
+
+            # 分批处理图像数据，提取特征
+            batch_split = self.infer_batch  # 8
+            total_imgs_splits = total_imgs_tensor.split(batch_split)  # 每8个为一个batch
             total_feats_split = []
             for imgs_split in total_imgs_splits:
-                feats = self.backbone(imgs_split)
+                feats = self.backbone(imgs_split)  # ResNet+FPN，得到p3~p6的特征dict(p3:(8,256,72,128) p4:p5:p6:(8,256,9,16)))
                 total_feats_split.append(feats)
-            total_feats, feats_l, feats_g = {}, {}, {}
-            len_l, len_g = len(local_imgs), (global_imgs)
-            for p in self.in_features:
-                total_feats[p] = torch.cat([feats[p] for feats in total_feats_split], dim=0)
-                feats_l[p] = total_feats[p][:len_l]
-                feats_g[p] = total_feats[p][len_l:]
 
+            # 整合特征，根据配置文件，提取p3p4p5级别的特征
+            total_feats, feats_l, feats_g = {}, {}, {}
+            len_l, len_g = len(local_imgs), len(global_imgs)  # 8 24
+            for p in self.in_features:  # 提取p3~p5 (配置文件)
+                total_feats[p] = torch.cat([feats[p] for feats in total_feats_split], dim=0)  # 把p3级别的特征图合并在一起(同理p4p5)
+                feats_l[p] = total_feats[p][:len_l]  # 原来是32张图片一起提取的特征图，现在分开，local为8张。
+                feats_g[p] = total_feats[p][len_l:]  # global为24张
+
+            # 使用模型进行预测，分batch处理
             classes_list_all, boxes_list_all, proposals_list_all, proposals_list_k1, proposals_list_k2, \
                 boxes_init_list_all = [], [], [], [], [], []
             for bi, feats in enumerate(total_feats_split):
+                # 获取特征
                 f = []
-                for p in self.in_features:
+                for p in self.in_features:  # ['p3', 'p4', 'p5']
                     f.append(feats[p])
 
-                B = len(f[0])
-                h, w = imgs.image_sizes[0]
-                images_whwh = torch.tensor([w, h, w, h], dtype=torch.float32, device=self.device)
-                images_whwh_B = images_whwh.unsqueeze(0).expand(B,-1)
+                # 获取图像尺寸
+                B = len(f[0])  # batch=8
+                h, w = imgs.image_sizes[0]  # 562 999
+                images_whwh = torch.tensor([w, h, w, h], dtype=torch.float32, device=self.device)  # tensor(999.,562.,999.,562.,)
+                images_whwh_B = images_whwh.unsqueeze(0).expand(B,-1)  # (8,4) 8个images_whwh
 
-                shape_g = (B, self.num_proposals, 4)
-                box_init = torch.randn(shape_g, device=self.device)
+                # 随机初始化提议框(精髓所在，不需要启发式的目标先验，也不需要可学习的查询，从而进一步简化了目标候选)
+                shape_g = (B, self.num_proposals, 4)  # (8,500,4)
+                box_init = torch.randn(shape_g, device=self.device)  # (8,500,4) 随机框坐标
                 time_g = 999
-                time_cond_g = torch.full((B,), time_g, device=self.device, dtype=torch.long)
+                time_cond_g = torch.full((B,), time_g, device=self.device, dtype=torch.long)  # 时间步
 
-                proposal_all, proposal_k1, proposal_k2 = self.model_predictions(f, images_whwh_B, box_init, time_cond_g,
-                                                                              None, clip_x_start=True, box_extract=bi+1)
-                boxes_init_list_all.append(box_init)
-                classes_list_all.append(proposal_all[0])
-                boxes_list_all.append(proposal_all[1])
-                proposals_list_all.append(proposal_all[2])
-                proposals_list_k1.append(proposal_k1)
-                proposals_list_k2.append(proposal_k2)
+                # return self.head(xxx) 返回的是什么？
+                # return [class_logits, bboxes, proposal_features], proposal_feat_frame[topk_idx_bool], proposal_feat_frame[topk_idx_bool2]
+                proposal_all, proposal_k1, proposal_k2 = \
+                    self.model_predictions(f, images_whwh_B, box_init, time_cond_g, None, clip_x_start=True, box_extract=bi+1)
 
-            # concat all extracted data
-            boxes_init_t = torch.cat(boxes_init_list_all, dim=0).view(-1, self.num_proposals, 4)
-            classes_t = torch.cat(classes_list_all, dim=0).view(-1, self.num_proposals, 30)
-            boxes_t = torch.cat(boxes_list_all, dim=0).view(-1, self.num_proposals, 4)
-            proposals_t = torch.cat(proposals_list_all, dim=1).view(-1, self.num_proposals, self.hidden_dim)
-            proposals_t1 = torch.cat(proposals_list_k1, dim=0).view(-1, self.top_k[0], self.hidden_dim)
-            proposals_t2 = torch.cat(proposals_list_k2, dim=0).view(-1, self.top_k[1], self.hidden_dim)
+                # 需要Debug一下，看看表示什么
+                boxes_init_list_all.append(box_init)  # (8,500,4) 随机的初始化框
+                classes_list_all.append(proposal_all[0])  # (8,500,30) 预测的类别
+                boxes_list_all.append(proposal_all[1])  # (8,500,4)  预测的坐标
+                proposals_list_all.append(proposal_all[2])  # (1,4000,256)  提议特征
+                proposals_list_k1.append(proposal_k1)   # (600,256)，得分最高的类别的特征
+                proposals_list_k2.append(proposal_k2)   # (200,256) 得分第二高的类别的特征
 
-            # prepare data for local queue and global mem
+            # 合并所有提取的数据，从4个batch转为(32,500,xxx)等
+            boxes_init_t = torch.cat(boxes_init_list_all, dim=0).view(-1, self.num_proposals, 4)  # (32,500,4)
+            classes_t = torch.cat(classes_list_all, dim=0).view(-1, self.num_proposals, 30)  # (32,500,30)
+            boxes_t = torch.cat(boxes_list_all, dim=0).view(-1, self.num_proposals, 4)  # (32,500,4)
+            proposals_t = torch.cat(proposals_list_all, dim=1).view(-1, self.num_proposals, self.hidden_dim)  # (32,500,256)
+            proposals_t1 = torch.cat(proposals_list_k1, dim=0).view(-1, self.top_k[0], self.hidden_dim)  # (32,75,256)
+            proposals_t2 = torch.cat(proposals_list_k2, dim=0).view(-1, self.top_k[1], self.hidden_dim)  # (32,25,256)
+
+            # 为local queue和global mem准备数据
             boxes_init_all = boxes_init_t[:len_l]
             classes_all = classes_t[:len_l]
             boxes_all = boxes_t[:len_l]
@@ -490,14 +496,14 @@ class DiffusionDet(nn.Module):
         # 2. update global mem 更新全局记忆
         if infos["ref_g"]:
             global_feat_new, idx = update_erase_memory(
-                feats_new=proposals_g1.view(-1, self.hidden_dim),
-                feats_mem=self.head.proposal_feats_global[0],
+                feats_new=proposals_g1.view(-1, self.hidden_dim),  # (24,75,256)转变为(1800,256)
+                feats_mem=self.head.proposal_feats_global[0],  # 记忆模块中的特征
                 target_size=self.mem_management_size_test)
             global_feat_dis_new, idx2 = update_erase_memory(
-                feats_new=proposals_g2.view(-1, self.hidden_dim),
+                feats_new=proposals_g2.view(-1, self.hidden_dim),  # 同上(24,25,256)转为(600,256)
                 feats_mem=self.head.proposal_feats_global[1],
                 target_size=150)
-            self.head.proposal_feats_global = [global_feat_new, global_feat_dis_new]
+            self.head.proposal_feats_global = [global_feat_new, global_feat_dis_new]  # 更新全局记忆
 
         # 3. update local mem  更新局部记忆
         if infos["frame_category"] == 0:  # a new video
@@ -665,19 +671,20 @@ class DiffusionDet(nn.Module):
         )
 
     def model_predictions(self, backbone_feats, images_whwh, x, t, x_self_cond=None, clip_x_start=False, box_extract=0):
-        # test phase input output coordinates change
-        x_boxes = torch.clamp(x, min=-1 * self.scale, max=self.scale)
-        x_boxes = ((x_boxes / self.scale) + 1) / 2
-        x_boxes = box_cxcywh_to_xyxy(x_boxes)
-        x_boxes = x_boxes * images_whwh[:, None, :]
-        if box_extract:
+        # x是随机框(8,500,4)，
+        x_boxes = torch.clamp(x, min=-1 * self.scale, max=self.scale)  # 限制在[-2,2]内
+        x_boxes = ((x_boxes / self.scale) + 1) / 2  # 归一化，限制到[0,1]内
+        x_boxes = box_cxcywh_to_xyxy(x_boxes)  # 转换格式 (x1,y1,x2,y2)
+        x_boxes = x_boxes * images_whwh[:, None, :]  # *高宽，转为实际坐标
+        if box_extract:  # 中间阶段的预测走这里，逐步细化
             return self.head(backbone_feats, x_boxes, t, None, box_extract)
-        else:
+        else:  # 最后阶段的预测分类和坐标走这里
             outputs_class, outputs_coord = self.head(backbone_feats, x_boxes, t, None)
 
         k = 0  # self.key_frame_location
 
-        x_start = outputs_coord[-1]  # (stages, batch, num_proposals, 4) predict boxes: absolute coordinates (x1, y1, x2, y2)
+        # (stages, batch, num_proposals, 4) predict boxes: absolute coordinates (x1, y1, x2, y2)
+        x_start = outputs_coord[-1]  # x_start: 是经过模型预测得到的初始坐标，用作预测的起点。
         x_start = x_start / images_whwh[k, None, :]  # images_whwh[:, None, :]
         x_start = box_xyxy_to_cxcywh(x_start)
         x_start = (x_start * 2 - 1.) * self.scale
@@ -686,6 +693,10 @@ class DiffusionDet(nn.Module):
             pred_noise = self.predict_noise_from_start(x[self.head.topk_idx_bool].view(*x_start.size()), t, x_start)
         else:
             pred_noise = self.predict_noise_from_start(x, t, x_start)
+
+        # ModelPrediction(pred_noise, x_start) 表示创建了一个 ModelPrediction 类型的命名元组，
+        # 其中pred_noise和pred_x_start是该元组的两个字段。
+        # pred_noise 是模型预测的噪音（或偏移量），用于调整初始坐标x_start，以生成最终的预测框坐标。
         return ModelPrediction(pred_noise, x_start), outputs_class, outputs_coord
 
 
@@ -738,6 +749,7 @@ class DiffusionDet(nn.Module):
         diff_boxes = box_cxcywh_to_xyxy(x)  # 将中心坐标和宽高格式的边界框转换为左上角坐标和右下角坐标格式
 
         return diff_boxes, noise, t
+
 
     def prepare_targets(self, targets):
         # 对目标进行扩散（Diffusion）：生成从真实边界框（GT boxes）得到的噪声边界框（Noisy boxes）。
@@ -862,10 +874,10 @@ class DiffusionDet(nn.Module):
         return results
 
 def update_erase_memory(feats_new=None, feats_mem=None, rois_new=None, rois_mem=None, target_size=None, mem_management_type="greedy"):
+    #  feats_new: k obj features (1800,256)
     #  feats_mem: n obj features
-    #  feats_new: k obj features
     #  returns target_size updated feats
-    assert target_size is not None
+    assert target_size is not None  # 900
 
     merged_feat_list = [feats_mem, feats_new]
     merged_feat_list = [f for f in merged_feat_list if f is not None]
@@ -873,14 +885,14 @@ def update_erase_memory(feats_new=None, feats_mem=None, rois_new=None, rois_mem=
     if len(merged_feat) <= target_size:
         return merged_feat, torch.arange(len(merged_feat), device=merged_feat.device)
 
-    if mem_management_type == "greedy":
+    if mem_management_type == "greedy":  # 贪婪算法
         idx_to_be_remained = select_farthest_k_greedy_cuda(merged_feat=merged_feat, k=target_size)
     elif mem_management_type == "random":
         idx_to_be_remained = np.random.choice(len(merged_feat), target_size, replace=False)
     else:
         raise NotImplementedError
 
-    result_feat = merged_feat[idx_to_be_remained]
+    result_feat = merged_feat[idx_to_be_remained]  # 留下900个最好的特征 (900,256)
 
     if rois_new is not None:
         merged_rois_list = torch.cat([rois_mem, rois_new], dim=0)

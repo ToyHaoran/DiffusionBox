@@ -2,8 +2,8 @@
 
 #SBATCH -p gpu1
 #SBATCH --gpus=1
-#SBATCH --nodelist=aiwkr3
-alias ll='ls -al'  # 快捷键
+
+alias ll='ls -al'  # 快捷键  # 无需指定结点SBATCH --nodelist=aiwkr3
 module load anaconda/anaconda3-2022.10  # 加载conda
 module load cuda/11.1.0  # 加载cuda
 module load gcc-11
