@@ -44,10 +44,21 @@ def default(val, d):
 
 
 def extract(a, t, x_shape):
-    """extract the appropriate  t  index for a batch of indices"""
-    batch_size = t.shape[0]
-    out = a.gather(-1, t)
-    return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
+    """
+    提取适当的时间索引t对应的一批索引值
+
+    参数:
+    a: 输入的tensor，需要从中提取索引值
+    t: 时间索引的batch，指定要提取的索引位置
+    x_shape: 目标tensor的形状，用于重塑提取出的索引值
+
+    返回值:
+    返回一个根据x_shape重塑后的tensor，包含了对应t索引的值
+    """
+    batch_size = t.shape[0]  # 获取时间索引t的batch大小
+    out = a.gather(-1, t)  # 根据时间索引t从a中提取相应的值
+    return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))  # 重塑提取出的值，使其匹配x_shape的形状
+
 
 
 def cosine_beta_schedule(timesteps, s=0.008):
@@ -469,13 +480,12 @@ class DiffusionDet(nn.Module):
                 proposal_all, proposal_k1, proposal_k2 = \
                     self.model_predictions(f, images_whwh_B, box_init, time_cond_g, None, clip_x_start=True, box_extract=bi+1)
 
-                # 需要Debug一下，看看表示什么
                 boxes_init_list_all.append(box_init)  # (8,500,4) 随机的初始化框
                 classes_list_all.append(proposal_all[0])  # (8,500,30) 预测的类别
                 boxes_list_all.append(proposal_all[1])  # (8,500,4)  预测的坐标
-                proposals_list_all.append(proposal_all[2])  # (1,4000,256)  提议特征
-                proposals_list_k1.append(proposal_k1)   # (600,256)，得分最高的类别的特征
-                proposals_list_k2.append(proposal_k2)   # (200,256) 得分第二高的类别的特征
+                proposals_list_all.append(proposal_all[2])  # (1,4000,256)  提议特征 (8,500,256)
+                proposals_list_k1.append(proposal_k1)   # (600,256)，类别得分最高的topk=75特征 (8, 75, 256)
+                proposals_list_k2.append(proposal_k2)   # (200,256) 类别得分最高的topk=25特征 (8, 25, 256)
 
             # 合并所有提取的数据，从4个batch转为(32,500,xxx)等
             boxes_init_t = torch.cat(boxes_init_list_all, dim=0).view(-1, self.num_proposals, 4)  # (32,500,4)
@@ -485,7 +495,7 @@ class DiffusionDet(nn.Module):
             proposals_t1 = torch.cat(proposals_list_k1, dim=0).view(-1, self.top_k[0], self.hidden_dim)  # (32,75,256)
             proposals_t2 = torch.cat(proposals_list_k2, dim=0).view(-1, self.top_k[1], self.hidden_dim)  # (32,25,256)
 
-            # 为local queue和global mem准备数据
+            # 为local queue和global mem准备数据 局部帧为8，全局帧为24
             boxes_init_all = boxes_init_t[:len_l]
             classes_all = classes_t[:len_l]
             boxes_all = boxes_t[:len_l]
@@ -493,60 +503,60 @@ class DiffusionDet(nn.Module):
             proposals_l1, proposals_g1 = proposals_t1[:len_l], proposals_t1[len_l:]
             proposals_l2, proposals_g2 = proposals_t2[:len_l], proposals_t2[len_l:]
 
-        # 2. update global mem 更新全局记忆
+        # 2. update global mem 更新全局记忆 即全局最优查询模块
         if infos["ref_g"]:
             global_feat_new, idx = update_erase_memory(
                 feats_new=proposals_g1.view(-1, self.hidden_dim),  # (24,75,256)转变为(1800,256)
                 feats_mem=self.head.proposal_feats_global[0],  # 记忆模块中的特征
-                target_size=self.mem_management_size_test)
+                target_size=self.mem_management_size_test)  # (900,256)
             global_feat_dis_new, idx2 = update_erase_memory(
                 feats_new=proposals_g2.view(-1, self.hidden_dim),  # 同上(24,25,256)转为(600,256)
                 feats_mem=self.head.proposal_feats_global[1],
-                target_size=150)
-            self.head.proposal_feats_global = [global_feat_new, global_feat_dis_new]  # 更新全局记忆
+                target_size=150)  # (150,256)
+            self.head.proposal_feats_global = [global_feat_new, global_feat_dis_new]  # 更新全局记忆[(900,256),(150,256)]
 
-        # 3. update local mem  更新局部记忆
+        # 3. update local mem  更新局部记忆 (局部批量细化模块？当前帧一个批次内处理。)
         if infos["frame_category"] == 0:  # a new video
             frame_diff = self.frame_id - self.start_id
             fill_idx = [0] * (self.key_frame_location - frame_diff) + list(range(len(local_imgs))) \
                        + [len(local_imgs)-1] * (self.all_frame_interval - ((self.key_frame_location - frame_diff) + len(local_imgs)))
         elif infos["frame_category"] == 1:
             fill_idx = range(len(local_imgs))
-        # fill sampled local features queue
-        for i in fill_idx:
-            frame_feat = []
+        # 填充局部特征队列，用于局部批量细化
+        for i in fill_idx:  # [0, 1, 2, 3, 4, 5, 6, 7]
+            frame_feat = []  # [(1, 256, 72, 128), (1, 256, 36, 64), (1, 256, 18, 32)]
             for p in self.in_features:
                 frame_feat.append(feats_l[p][i].unsqueeze(0))
             self.feats.append(frame_feat)
-            self.classes_300.append(classes_all[i].unsqueeze(0))
-            self.proposals_init_300.append(boxes_init_all[i].unsqueeze(0))
-            self.proposals_300.append(boxes_all[i].unsqueeze(0))
-            self.proposals_feat_300.append(proposals_all[i])
+            self.classes_300.append(classes_all[i].unsqueeze(0))  # 队列中都是(1,500,30)
+            self.proposals_init_300.append(boxes_init_all[i].unsqueeze(0))  # (1,500,4)
+            self.proposals_300.append(boxes_all[i].unsqueeze(0))  # (1,500,4)
+            self.proposals_feat_300.append(proposals_all[i])  # (500,256)
             if self.local_box_enable:
                 self.proposals_feat.append(proposals_l1[i])
                 self.proposals_feat_dis.append(proposals_l2[i])
 
-        if self.local_box_enable:
+        if self.local_box_enable:  # 配置未开启
             self.head.proposal_feats_local = [torch.cat(list(self.proposals_feat), dim=0), torch.cat(list(self.proposals_feat_dis), dim=0)]
 
-        # get preprocessed current batch feature & queries
-        batch = min(self.infer_batch, self.end_id - self.frame_id + 1) # 1  # len(self.feats)
+        # 获取预处理的当前批次特征和查询 get preprocessed current batch feature & queries
+        batch = min(self.infer_batch, self.end_id - self.frame_id + 1)  # 8
         range_start = self.key_frame_location
         range_end = self.key_frame_location + batch
-        feats_cur = []
+        feats_cur = []  # [(8, 256, 72, 128), (8, 256, 36, 64), (8, 256, 18, 32)]
         for j in range(len(self.in_features)):
             feats_cur.append(torch.cat([self.feats[i][j] for i in range(range_start, range_end)]))
         self.head.proposals_feat_cur = [[torch.cat([self.classes_300[i] for i in range(range_start, range_end)], dim=0),
                                         torch.cat([self.proposals_300[i] for i in range(range_start, range_end)], dim=0),
                                         torch.cat([self.proposals_feat_300[i] for i in range(range_start, range_end)], dim=0).unsqueeze(0)]]
-        #feats_cur = self.feats[self.key_frame_location]
+        # head.proposals_feat_cur [[(8,500,30),(8,500,4),(1,4000,256)]]
 
-        # diffusion preparation  扩散准备
+        # 扩散准备 diffusion preparation
         images_whwh = list()
         for i in range(batch):
             h, w = imgs.image_sizes[0]  # assume image size are same
             images_whwh.append(torch.tensor([w, h, w, h], dtype=torch.float32, device=self.device))
-        images_whwh = torch.stack(images_whwh)
+        images_whwh = torch.stack(images_whwh)  # (8,4) [996,562,996,562]
 
         shape = (batch, self.num_proposals, 4)
         total_timesteps, sampling_timesteps, eta, objective = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
@@ -554,9 +564,9 @@ class DiffusionDet(nn.Module):
         # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
         times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)
         times = list(reversed(times.int().tolist()))
-        time_pairs = list(zip(times[:-1], times[1:]))  # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+        time_pairs = list(zip(times[:-1], times[1:]))  # (999,-1)  # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
 
-        # random init. of predict boxes
+        # 预测框的随机初始化 random init. of predict boxes
         img = torch.randn(shape, device=self.device)
         #if infos["frame_category"] == 1:
             #img = torch.cat([self.last_output["pred_boxes"], img], dim=1)[:, :self.num_proposals, :]
@@ -564,59 +574,72 @@ class DiffusionDet(nn.Module):
         ensemble_score, ensemble_label, ensemble_coord = [], [], []
         x_start = None
         clip_denoised = True
-        do_postprocess = False
+        do_postprocess = False  # 是否后处理？
 
         for time, time_next in time_pairs:
             time_cond = torch.full((batch,), time, device=self.device, dtype=torch.long)
             self_cond = x_start if self.self_condition else None
-
+            # 预测噪声，预测框类别(1,8,500,30)，预测框坐标(1,8,500,4)  TODO 内部再debug一下
             preds, outputs_class, outputs_coord = self.model_predictions(feats_cur, images_whwh, img, time_cond,
                                                                          self_cond, clip_x_start=clip_denoised)
-            pred_noise, x_start = preds.pred_noise, preds.pred_x_start
+            pred_noise, x_start = preds.pred_noise, preds.pred_x_start  # 都是(8,500,4)
 
-            if self.box_renewal:  # filter
+            # 根据模型输出的得分和阈值，对图像中的提议框进行过滤和优化。
+            if self.box_renewal:
+                # 获取每个图像的得分和提议框
                 score_per_image, box_per_image = outputs_class[-1][:, :self.num_proposals], outputs_coord[-1][:, :self.num_proposals]
+                # 设置阈值
                 threshold = 0.5
+                # 对得分应用Sigmoid函数
                 score_per_image = torch.sigmoid(score_per_image)
+                # 获取最大得分值
                 value, _ = torch.max(input=score_per_image, dim=-1, keepdim=False)
+                # 根据阈值过滤提议框
                 keep_idx = value > threshold
+                # 计算过滤后剩余提议框的数量
                 num_remain = torch.sum(keep_idx, dim=-1)
-
+                # 过滤后的提议框、起始坐标和噪声
                 pred_noise = [pred_noise[i, keep_idx[i]] for i in range(batch)]
                 x_start = [x_start[i, keep_idx[i]] for i in range(batch)]
+                # 根据是否使用topk选择图像
                 if self.head.use_topk:
                     img = [img[self.head.topk_idx_bool].view(*box_per_image.size())[i, keep_idx[i]] for i in range(batch)]
                 else:
                     img = [img[i, keep_idx[i]] for i in range(batch)]
+            # 如果下一个时间步小于0，则重置图像为起始坐标，并继续循环
             if time_next < 0:
                 img = x_start
                 continue
 
-            # DDIM
+            # DDIM (Diffusion Denoising Implicit Model) 的一个步骤
+            # 计算当前时间和下一个时间点的alpha累积值，并转换为适当的设备和数据类型
             alpha = self.alphas_cumprod[time].to('cpu').to(torch.float64)
             alpha_next = self.alphas_cumprod[time_next].to('cpu').to(torch.float64)
-
+            # 根据公式计算sigma和c的值，用于噪声的加入和图像的更新
             sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
             c = (1 - alpha_next - sigma ** 2).sqrt()
-
+            # 准备下一个时间点的alpha累积值，用于后续的图像更新计算
             alpha_next = self.alphas_cumprod[time_next]
-
+            # 对批次中的每个图像进行更新处理
             for i in range(batch):
+                # 生成高斯噪声
                 noise = torch.randn_like(img[i])
-
+                # 根据公式更新图像
                 img[i] = x_start[i] * alpha_next.sqrt() + \
                          c.to(torch.float32).to('cuda') * pred_noise[i] + \
                          sigma.to(torch.float32).to('cuda') * noise
-
-                if self.box_renewal:  # filter
-                    # replenish with randn boxes
+                # 如果启用箱体更新，则补充随机箱体
+                if self.box_renewal:
                     img[i] = torch.cat((img[i], torch.randn(self.num_proposals - num_remain[i], 4, device=img[i].device)), dim=0)
+            # 将处理后的图像堆叠起来
             img = torch.stack(img, dim=0)
-
+            # 如果启用了集合预测并且采样时间步长大于1，则进行集合预测并更新相关统计
             if self.use_ensemble and self.sampling_timesteps > 1:
+                # 进行集合推理以获取批次的预测框、分数和标签
                 box_pred_batch, scores_batch, labels_batch = self.inference(outputs_class[-1],
                                                                             outputs_coord[-1],
                                                                             imgs.image_sizes * batch)
+                # 将集合预测的结果添加到各自的列表中
                 ensemble_score.append(scores_batch)
                 ensemble_label.append(labels_batch)
                 ensemble_coord.append(box_pred_batch)
@@ -702,12 +725,26 @@ class DiffusionDet(nn.Module):
 
     # forward diffusion
     def q_sample(self, x_start, t, noise=None):
+        """
+        生成一个经过特定噪声增强的样本。
+
+        参数:
+        - x_start: tensor，起始点的值。
+        - t: int，当前时间步。
+        - noise: tensor，可选，添加的噪声。若未提供，则自动生成。
+
+        返回:
+        - tensor，生成的噪声增强样本。
+        """
+        # 若未提供噪声，自动生成
         if noise is None:
             noise = torch.randn_like(x_start)
 
+        # 提取累积乘积的平方根值
         sqrt_alphas_cumprod_t = extract(self.sqrt_alphas_cumprod, t, x_start.shape)
         sqrt_one_minus_alphas_cumprod_t = extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape)
 
+        # 计算并返回增强样本
         return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
 
     def prepare_diffusion_concat(self, gt_boxes):

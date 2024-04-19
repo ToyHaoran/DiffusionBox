@@ -163,8 +163,8 @@ def make_data_loader(cfg, is_train=True, is_distributed=False, start_iter=0, is_
 
     # If bbox aug is enabled in testing, simply set transforms to None and we will apply transforms later
     transforms = None if not is_train and cfg.TEST.BBOX_AUG.ENABLED else build_transforms(cfg, is_train)
+    # 从DET_train_30classes和VID_train_15frames中读取帧数据 109815张图片列表
     datasets = build_dataset(dataset_list, transforms, DatasetCatalog, is_train or is_for_period, cfg.MODEL.VID.METHOD)
-
     if is_train:
         # save category_id to label name mapping
         save_labels(datasets, cfg.OUTPUT_DIR)

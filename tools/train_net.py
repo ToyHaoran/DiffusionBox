@@ -79,7 +79,7 @@ def train(cfg, local_rank, distributed):
 
     if not cfg.MODEL.VID.IGNORE:  # 如果没有忽略视频检测相关的部分，更新参数字典
         arguments.update(extra_checkpoint_data)
-    # 加载数据，速度稍慢  DET_train_30classes_keep.pkl  VID_train_15frames_keep.pkl
+    # 加载数据，速度稍慢
     data_loader = make_data_loader(
         cfg,
         is_train=True,

@@ -304,15 +304,16 @@ class DynamicHead(nn.Module):
 
         # 对应论文中的构建核心集 Constructing Core-Set 中的黄色块 核心集选择
         if self.training or box_extract > 0:
-            # 选择每一帧中的top K个局部框（local boxes）对应的特征。
+            # 选择每一帧中类别得分最高的top K个局部框(local boxes)对应的特征。
+            # class_logits (8,500,30) 预测的类别，class_logits_max是每个样本(500个框)在最后一个维度上的最大值(8,500)
             class_logits_max, _ = torch.max(input=class_logits, dim=-1, keepdim=False)
-            topk_val, topk_idx = class_logits_max.topk(k=self.top_k[0], dim=-1)  # 选择每个帧中类别分数最高的前K个局部框。
-            topk_idx_bool = torch.zeros_like(class_logits_max, dtype=torch.bool)  # 创建布尔掩码,每个帧中最高类别分数的前K个局部框
+            topk_val, topk_idx = class_logits_max.topk(k=self.top_k[0], dim=-1)  # 选择类别得分最高的前K=75个 值、框的idx。都是(8,75)
+            # 创建布尔掩码，并将idx处的值设置为true (8,500)，用于提取对应框 对应的特征proposal_feat_frame[topk_idx_bool]
+            topk_idx_bool = torch.zeros_like(class_logits_max, dtype=torch.bool)
             topk_idx_bool.scatter_(1, topk_idx, 1)
-            topk_idx_bool2 = torch.zeros_like(class_logits_max, dtype=torch.bool)  # 每个帧中第二高类别分数的前K个局部框。
-            topk_idx_bool2.scatter_(1, topk_idx[:, :self.top_k[1]], 1)
-            # for i in range(len(topk_idx_bool)):
-            #    topk_idx_bool[i, topk_idx[i]] = 1
+            topk_idx_bool2 = torch.zeros_like(class_logits_max, dtype=torch.bool)
+            topk_idx_bool2.scatter_(1, topk_idx[:, :self.top_k[1]], 1)  # 在前75个中再次选择前25个
+
             if box_extract > 0:  # 是否进行框提取
                 proposal_feat_frame = proposal_features.view([-1, num_boxes, dim])
                 return [class_logits, bboxes, proposal_features], \
