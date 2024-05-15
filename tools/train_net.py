@@ -206,8 +206,8 @@ def main():
     # this is similar to the behavior of detectron2, which I think is a nice option.
     BASE_CONFIG = "configs/BASE_RCNN_{}gpu.yaml".format(num_gpus)  # 配置基础设置'configs/BASE_RCNN_1gpu.yaml'
     cfg.merge_from_file(BASE_CONFIG)
-    if 'Diffusion' in args.config_file:  # 根据配置文件添加特定的配置
-        add_diffusiondet_config(cfg)
+    # if 'Diffusion' in args.config_file:  # 根据配置文件添加特定的配置
+    add_diffusiondet_config(cfg)  # 添加扩散模型参数
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
 

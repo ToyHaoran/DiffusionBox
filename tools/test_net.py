@@ -77,8 +77,8 @@ def main():
 
     BASE_CONFIG = "configs/BASE_RCNN_{}gpu.yaml".format(num_gpus)
     cfg.merge_from_file(BASE_CONFIG)
-    if 'Diffusion' in args.config_file:
-        add_diffusiondet_config(cfg)
+    # if 'Diffusion' in args.config_file:
+    add_diffusiondet_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()

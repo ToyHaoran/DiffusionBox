@@ -545,9 +545,9 @@ class HungarianMatcherDynamicK(nn.Module):
             indices = []
             matched_ids = []
             assert bs == len(targets)
-            for batch_idx in range(bs):
-                bz_boxes = out_bbox[batch_idx]  # [num_proposals, 4]
-                bz_out_prob = out_prob[batch_idx]
+            for batch_idx in range(bs):  # TODO DEBUG一下
+                bz_boxes = out_bbox[batch_idx]   # [500, 4]  预测的绝对坐标：xyxy
+                bz_out_prob = out_prob[batch_idx]  # [500, 30] 预测类别
                 bz_tgt_ids = targets[batch_idx]["labels"] - 1
                 num_insts = len(bz_tgt_ids)
                 if num_insts == 0:  # empty object in key frame
@@ -558,7 +558,7 @@ class HungarianMatcherDynamicK(nn.Module):
                     matched_ids.append(matched_qidx)
                     continue
 
-                bz_gtboxs = targets[batch_idx]['boxes']  # [num_gt, 4] normalized (cx, xy, w, h)
+                bz_gtboxs = targets[batch_idx]['boxes']  # [num_gt, 4] 归一化的 (cx, xy, w, h)
                 bz_gtboxs_abs_xyxy = targets[batch_idx]['boxes_xyxy']
                 fg_mask, is_in_boxes_and_center = self.get_in_boxes_info(
                     box_xyxy_to_cxcywh(bz_boxes),  # absolute (cx, cy, w, h)
@@ -566,6 +566,7 @@ class HungarianMatcherDynamicK(nn.Module):
                     expanded_strides=32
                 )
 
+                # IOU函数
                 pair_wise_ious = ops.box_iou(bz_boxes, bz_gtboxs_abs_xyxy)
 
                 # Compute the classification cost.
@@ -626,6 +627,7 @@ class HungarianMatcherDynamicK(nn.Module):
         is_in_boxes_all = is_in_boxes.sum(1) > 0  # [num_query]
         # in fixed center
         center_radius = 2.5
+        # 用预测（anchor）框中心点与gt中心点距离判断: x_gt-x<2.5w  x-x_gt<2.5w
         # Modified to self-adapted sampling --- the center size depends on the size of the gt boxes
         # https://github.com/dulucas/UVO_Challenge/blob/main/Track1/detection/mmdet/core/bbox/assigners/rpn_sim_ota_assigner.py#L212
         b_l = anchor_center_x > (target_gts[:, 0] - (center_radius * (xy_target_gts[:, 2] - xy_target_gts[:, 0]))).unsqueeze(0)

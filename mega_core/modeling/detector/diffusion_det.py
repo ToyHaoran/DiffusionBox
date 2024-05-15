@@ -503,7 +503,7 @@ class DiffusionDet(nn.Module):
             proposals_l1, proposals_g1 = proposals_t1[:len_l], proposals_t1[len_l:]
             proposals_l2, proposals_g2 = proposals_t2[:len_l], proposals_t2[len_l:]
 
-        # 2. update global mem 更新全局记忆 即全局最优查询模块
+        # 2. update global mem 更新全局记忆 即全局最优语义特征模块
         if infos["ref_g"]:
             global_feat_new, idx = update_erase_memory(
                 feats_new=proposals_g1.view(-1, self.hidden_dim),  # (24,75,256)转变为(1800,256)
@@ -562,6 +562,7 @@ class DiffusionDet(nn.Module):
         total_timesteps, sampling_timesteps, eta, objective = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
 
         # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        # sampling_timesteps=1时就一个(999,-1)，采样时间步越大，推理速度越慢。
         times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:]))  # (999,-1)  # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
@@ -576,7 +577,7 @@ class DiffusionDet(nn.Module):
         clip_denoised = True
         do_postprocess = False  # 是否后处理？
 
-        for time, time_next in time_pairs:
+        for time, time_next in time_pairs:  # TMD这里是固定的(999,-1)，不会进入DDIM
             time_cond = torch.full((batch,), time, device=self.device, dtype=torch.long)
             self_cond = x_start if self.self_condition else None
             # 预测噪声，预测框类别(1,8,500,30)，预测框坐标(1,8,500,4)  TODO 内部再debug一下
@@ -611,8 +612,8 @@ class DiffusionDet(nn.Module):
                 img = x_start
                 continue
 
-            # DDIM (Diffusion Denoising Implicit Model) 的一个步骤
-            # 计算当前时间和下一个时间点的alpha累积值，并转换为适当的设备和数据类型
+            # DDIM (Diffusion Denoising Implicit Model) 的一个步骤 前面(999,-1) 一直continue，这里不会运行
+            # 计算当前时间和下一个时间点的alpha累积值
             alpha = self.alphas_cumprod[time].to('cpu').to(torch.float64)
             alpha_next = self.alphas_cumprod[time_next].to('cpu').to(torch.float64)
             # 根据公式计算sigma和c的值，用于噪声的加入和图像的更新
@@ -645,33 +646,43 @@ class DiffusionDet(nn.Module):
                 ensemble_coord.append(box_pred_batch)
 
         # NMS
+        # 使用集成方法和多时间步长采样时的处理逻辑
         if self.use_ensemble and self.sampling_timesteps > 1:
+            # 将ensemble中的坐标、分数和标签合并
             box_pred_batch = torch.cat(ensemble_coord, dim=1)
             scores_batch = torch.cat(ensemble_score, dim=1)
             labels_batch = torch.cat(ensemble_label, dim=1)
 
             results = []
-            image_size = imgs.image_sizes[0]
+            image_size = imgs.image_sizes[0]  # 获取第一张图片的大小，假设所有图片大小相同
+            # 遍历每个图像的预测，应用NMS并创建BoxList对象
             for i, (scores_per_image, box_pred_per_image, labels_per_image) in enumerate(zip(
                     scores_batch, box_pred_batch, labels_batch)):
+                # 如果启用NMS，则对每个图像的预测进行过滤
                 if self.use_nms:
                     keep = batched_nms(box_pred_per_image, scores_per_image, labels_per_image, 0.5)
                     box_pred_per_image = box_pred_per_image[keep]
                     scores_per_image = scores_per_image[keep]
                     labels_per_image = labels_per_image[keep]
+                # 创建并调整BoxList以适应图像大小
                 boxlist = BoxList(box_pred_per_image, image_size[::-1], mode="xyxy")
                 boxlist.add_field("scores", scores_per_image)
                 boxlist = boxlist.clip_to_image(remove_empty=False)
+                # 如果存在标签为0的预测，则抛出未实现错误
                 if (labels_per_image == 0).sum():
                     raise NotImplementedError('Not supported model')
                 boxlist.add_field("labels", labels_per_image)
                 results.append(boxlist)
         else:
+            # 单时间步长或不使用集成时的处理逻辑
             output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
-            box_cls = output["pred_logits"]
-            box_pred = output["pred_boxes"]
+            box_cls = output["pred_logits"]  # (8,500,30)
+            box_pred = output["pred_boxes"]  # (8,500,4)
+            # 保存最后的输出
             self.last_output = {'pred_logits': outputs_class[-1][keep_idx], 'pred_boxes': outputs_coord[-1][keep_idx]}
+            # 执行推理
             results = self.inference(box_cls, box_pred, imgs.image_sizes * batch)
+
 
         # new_img = view_image_with_boxes(imgs, results)
 
