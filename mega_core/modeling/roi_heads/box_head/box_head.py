@@ -545,16 +545,14 @@ class RCNNHead(nn.Module):
 
         fc_feature = obj_features.transpose(0, 1).reshape(N * nr_boxes, -1)  # 碾平为一维(1500 256)
 
-        # 对应论文中Scale和shift
+        # 对应论文中扩散模型的反向传播
         scale_shift = self.block_time_mlp(time_emb)  # 通过时间多层感知机（MLP）获得一个尺度和偏移的参数。
         scale_shift = torch.repeat_interleave(scale_shift, nr_boxes, dim=0)  # 将时间信息的尺度和偏移参数进行复制，以适应每个边框。
         scale, shift = scale_shift.chunk(2, dim=1)  # 将尺度和偏移参数分成两部分。
         fc_feature = fc_feature * (scale + 1) + shift  # 使用尺度和偏移对特征进行缩放和平移。引入时间信息，使得模型能够根据时间变化调整预测结果。
 
-        # 这里加一个特征聚合。
-
-
-        # 对应论文解码Decoder。将处理后的特征分别用于类别和边框的预测。
+        # 这里加一个特征聚合
+        # 用于类别和边框的预测。
         cls_feature = fc_feature.clone()
         reg_feature = fc_feature.clone()
         for cls_layer in self.cls_module:
@@ -610,6 +608,9 @@ class RCNNHead(nn.Module):
         scale_shift = torch.repeat_interleave(scale_shift, nr_boxes, dim=0)  # 将时间信息的尺度和偏移参数进行复制，以适应每个边框。
         scale, shift = scale_shift.chunk(2, dim=1)  # 将尺度和偏移参数分成两部分。
         fc_feature = fc_feature * (scale + 1) + shift  # 使用尺度和偏移对特征进行缩放和平移。引入时间信息，使得模型能够根据时间变化调整预测结果。
+
+        # 增加特征聚合
+        fc_feature = self.self_attn(fc_feature, fc_feature, value=fc_feature)[0]
 
         # 对应论文中第五步，解码Decoder。将处理后的特征分别用于类别和边框的预测。
         cls_feature = fc_feature.clone()
