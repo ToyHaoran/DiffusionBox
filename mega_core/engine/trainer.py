@@ -124,7 +124,6 @@ def do_train(
         for i in range(total_reuse_count):
             idx = idxs[i]
             if idx != -1 and method in ("mega", "dafa", "diffusion"):
-                # 交换当前帧和全局参考帧的图像及目标信息？为什么？
                 # 1. 随机选择全局参考帧
                 images["cur"], images["ref_g"][idx].tensors = images["ref_g"][idx].tensors[0], images["cur"][None,:]
                 targets[0][0], targets[1][idx] = targets_g[idx], targets_c[0]

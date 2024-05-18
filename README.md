@@ -1,11 +1,3 @@
-# DiffusionVID for Video Object Detection
-
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/diffusionvid-denoising-object-boxes-with/video-object-detection-on-imagenet-vid)](https://paperswithcode.com/sota/video-object-detection-on-imagenet-vid?p=diffusionvid-denoising-object-boxes-with)
-
-By Si-Dong Roh (sdroh1027@naver.com), Ki-Seok Chung in Hanyang Univ.
-
-This project is an official implementation of "[DiffusionVID: Denoising Object Boxes with Spatio-temporal Conditioning for Video Object Detection](https://ieeexplore.ieee.org/document/10299639)", IEEE Access, 2023.
-
 ## Citing DiffusionVID
 
 If our code was helpful, please consider citing our works.
@@ -29,19 +21,16 @@ doi={10.1109/ACCESS.2022.3203399}}
 ## Main Results
 
 
-|         Model         |  Backbone  | AP50 |                                              Link                                              |
-| :---------------------: | :----------: | :----: | :-----------------------------------------------------------------------------------------------: |
-| single frame baseline | ResNet-101 | 76.7 |  [Google](https://drive.google.com/file/d/1W17f9GC60rHU47lUeOEfU--Ra-LTw3Tq/view?usp=sharing)  |
-|          DFF          | ResNet-101 | 75.0 |  [Google](https://drive.google.com/file/d/1Dn_RQRlA7z2XkRRS4XERUW_UH9jlNvMo/view?usp=sharing)  |
-|         FGFA         | ResNet-101 | 78.0 |  [Google](https://drive.google.com/file/d/1yVgy7_ff1xVD1SooqbcK-OzKMgPpUcg4/view?usp=sharing)  |
-|       RDN-base       | ResNet-101 | 81.1 |  [Google](https://drive.google.com/file/d/1jM5LqlVtCGjKH-MocTCjzFIVjqCyng8M/view?usp=sharing)  |
-|          RDN          | ResNet-101 | 81.7 |  [Google](https://drive.google.com/file/d/1FgoOwj-GFAMVn2hkSFKnxn5fKWPSxlUF/view?usp=sharing)  |
-|         MEGA         | ResNet-101 | 82.9 |  [Google](https://drive.google.com/file/d/1ZnAdFafF1vW9Lnpw-RPF1AD_csw61lBY/view?usp=sharing)  |
-|         DAFA         | ResNet-101 | 84.5 |  [Google](https://drive.google.com/file/d/1fRuBW_FZkrYD6Cgtij2EukLPlf-spRhO/view?usp=sharing)  |
-| **DiffusionVID (x1)** | ResNet-101 | 86.9 | [Google](https://drive.google.com/file/d/1HmPflEiJScpmcKP89C4jGs7-Z1Te0evp/view?usp=drive_link) |
-| **DiffusionVID (x4)** | ResNet-101 | 87.1 |                                                                                                |
-| **DiffusionVID (x1)** | Swin-Base | 92.4 | [Google](https://drive.google.com/file/d/1wlUySKrNcUZdujGw1L4Q4V9KXyV14rQw/view?usp=drive_link) |
-| **DiffusionVID (x4)** | Swin-Base | 92.5 |                                                                                                |
+|         Model         |  Backbone  | AP50 |                                             Link                                             |
+| :---------------------: | :----------: | :----: | :--------------------------------------------------------------------------------------------: |
+| single frame baseline | ResNet-101 | 76.7 | [Google](https://drive.google.com/file/d/1W17f9GC60rHU47lUeOEfU--Ra-LTw3Tq/view?usp=sharing) |
+|          DFF          | ResNet-101 | 75.0 | [Google](https://drive.google.com/file/d/1Dn_RQRlA7z2XkRRS4XERUW_UH9jlNvMo/view?usp=sharing) |
+|         FGFA         | ResNet-101 | 78.0 | [Google](https://drive.google.com/file/d/1yVgy7_ff1xVD1SooqbcK-OzKMgPpUcg4/view?usp=sharing) |
+|       RDN-base       | ResNet-101 | 81.1 | [Google](https://drive.google.com/file/d/1jM5LqlVtCGjKH-MocTCjzFIVjqCyng8M/view?usp=sharing) |
+|          RDN          | ResNet-101 | 81.7 | [Google](https://drive.google.com/file/d/1FgoOwj-GFAMVn2hkSFKnxn5fKWPSxlUF/view?usp=sharing) |
+|         MEGA         | ResNet-101 | 82.9 | [Google](https://drive.google.com/file/d/1ZnAdFafF1vW9Lnpw-RPF1AD_csw61lBY/view?usp=sharing) |
+|         DAFA         | ResNet-101 | 84.5 | [Google](https://drive.google.com/file/d/1fRuBW_FZkrYD6Cgtij2EukLPlf-spRhO/view?usp=sharing) |
+|                      |            |      |                                                                                              |
 
 The link of previous models (single frame baseline, DFF, FGFA RDN, MEGA) are from MEGA.
 

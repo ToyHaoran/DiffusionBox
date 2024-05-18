@@ -291,7 +291,7 @@ class DynamicHead(nn.Module):
                 proposal_features = None
 
             # self frame feature generation task
-            # 遍历head序列中的3个RCNNHead，对应论文中的三个自细化模块Self-refinement module。
+            # 遍历head序列中的3个RCNNHead，对应论文中的三个自增强模块
             for head_idx, rcnn_head in enumerate(self.head_series):
                 class_logits, pred_bboxes, proposal_features = rcnn_head(features, bboxes, proposal_features, self.box_pooler, time)
                 if self.return_intermediate and self.training:  # 是否需要中间结果，保存类别和边界框结果。
@@ -508,14 +508,14 @@ class RCNNHead(nn.Module):
         self.bbox_weights = bbox_weights
 
     def forward(self, features, bboxes, pro_features, pooler, time_emb):
-        """ RCNNHead对应论文中的自细化模块 Self-Refinement Module
+        """ RCNNHead对应论文中的 语义特征渐进增强模块
         :param bboxes: (N, nr_boxes, 4)
         :param pro_features: (N, nr_boxes, d_model)
         """
 
         N, nr_boxes = bboxes.shape[:2]
 
-        # 通过roi从输入特征中提取与边界框相对应的感兴趣区域 roi_features，对应论文中的第二步。
+        # 通过roi从输入特征中提取与边界框相对应的感兴趣区域 roi_features，对应论文中第一步 提取ROI特征。
         proposal_boxes = list()
         for b in range(N):
             proposal_boxes.append(Boxes(bboxes[b]))
@@ -526,22 +526,82 @@ class RCNNHead(nn.Module):
 
         roi_features = roi_features.view(N * nr_boxes, self.d_model, -1).permute(2, 0, 1)
 
-        # self_att. 使用自注意力机制（self_attn）对提议特征进行自注意力操作。对应论文中的第一步：自注意力(黄色框)
+        # self_att. 使用自注意力机制（self_attn）对可学习特征进行自注意力操作。
         pro_features = pro_features.view(N, nr_boxes, self.d_model).permute(1, 0, 2)  # 调整维度
         pro_features2 = self.self_attn(pro_features, pro_features, value=pro_features)[0]  # 进行自注意力操作
         pro_features = pro_features + self.dropout1(pro_features2)  # 残差连接，避免过拟合
-        pro_features = self.norm1(pro_features)  # 层归一化
+        pro_features = self.norm1(pro_features)  # 层归一化  (300,5,256)
 
-        # inst_interact. 使用动态卷积（inst_interact）对提议特征和感兴趣区域特征进行交互。对应论文中的第三步DII。
+        # inst_interact. 使用动态卷积(inst_interact)对提议特征和感兴趣区域特征进行交互。对应论文中 融合上一轮次的特征。
         pro_features = pro_features.view(nr_boxes, N, self.d_model).permute(1, 0, 2).reshape(1, N * nr_boxes, self.d_model)
-        pro_features2 = self.inst_interact(pro_features, roi_features)  # 动态卷积 引入时间信息，有助于捕捉序列数据中的长期依赖性。
+        pro_features2 = self.inst_interact(pro_features, roi_features)  # 动态卷积
         pro_features = pro_features + self.dropout2(pro_features2)  # 残差连接
         obj_features = self.norm2(pro_features)
 
-        # obj_feature. 多层感知机（MLP），用于提取更高级别的特征。
+        # obj_feature. 多层感知机（MLP），用于提取更高级别的特征。可学习
         obj_features2 = self.linear2(self.dropout(self.activation(self.linear1(obj_features))))
         obj_features = obj_features + self.dropout3(obj_features2)
-        obj_features = self.norm3(obj_features)
+        obj_features = self.norm3(obj_features)  # (1,1500,256)可学习的意义特征，用于下一轮次的训练。
+
+        fc_feature = obj_features.transpose(0, 1).reshape(N * nr_boxes, -1)  # 碾平为一维(1500 256)
+
+        # 对应论文中Scale和shift
+        scale_shift = self.block_time_mlp(time_emb)  # 通过时间多层感知机（MLP）获得一个尺度和偏移的参数。
+        scale_shift = torch.repeat_interleave(scale_shift, nr_boxes, dim=0)  # 将时间信息的尺度和偏移参数进行复制，以适应每个边框。
+        scale, shift = scale_shift.chunk(2, dim=1)  # 将尺度和偏移参数分成两部分。
+        fc_feature = fc_feature * (scale + 1) + shift  # 使用尺度和偏移对特征进行缩放和平移。引入时间信息，使得模型能够根据时间变化调整预测结果。
+
+        # 这里加一个特征聚合。
+
+
+        # 对应论文解码Decoder。将处理后的特征分别用于类别和边框的预测。
+        cls_feature = fc_feature.clone()
+        reg_feature = fc_feature.clone()
+        for cls_layer in self.cls_module:
+            cls_feature = cls_layer(cls_feature)
+        for reg_layer in self.reg_module:
+            reg_feature = reg_layer(reg_feature)
+        class_logits = self.class_logits(cls_feature)  # 预测类别
+        bboxes_deltas = self.bboxes_delta(reg_feature)  # 预测边界框偏移
+        pred_bboxes = self.apply_deltas(bboxes_deltas, bboxes.view(-1, 4))  # 计算最终的预测边界框，用于下一轮的增强。
+
+        return class_logits.view(N, nr_boxes, -1), pred_bboxes.view(N, nr_boxes, -1), obj_features
+
+    def forward2(self, features, bboxes, pro_features, pooler, time_emb):
+        """ RCNNHead对应论文中的 语义特征渐进增强模块
+        :param bboxes: (N, nr_boxes, 4)
+        :param pro_features: (N, nr_boxes, d_model)
+        """
+
+        N, nr_boxes = bboxes.shape[:2]
+
+        # 通过roi从输入特征中提取与边界框相对应的感兴趣区域 roi_features，对应论文中提取ROI特征。
+        proposal_boxes = list()
+        for b in range(N):
+            proposal_boxes.append(Boxes(bboxes[b]))
+        roi_features = pooler(features, proposal_boxes)  # (1500, 256, 7, 7)
+
+        if pro_features is None:
+            pro_features = roi_features.view(N, nr_boxes, self.d_model, -1).mean(-1)
+
+        roi_features = roi_features.view(N * nr_boxes, self.d_model, -1).permute(2, 0, 1)
+
+        # self_att. 使用自注意力机制(self_attn)对语义特征进行自注意力操作。对应论文中的第一步：自注意力
+        roi_features = roi_features.view(N, nr_boxes, self.d_model).permute(1, 0, 2)  # 调整维度
+        roi_features2 = self.self_attn(roi_features, roi_features, value=roi_features)[0]  # 进行自注意力操作
+        roi_features = roi_features + self.dropout1(roi_features2)  # 残差连接，避免过拟合
+        roi_features = self.norm1(roi_features)  # 层归一化  (300,5,256*49)
+
+        # inst_interact. 使用动态卷积（inst_interact）对提议特征和感兴趣区域特征进行交互。对应论文中的第二步
+        pro_features = pro_features.view(nr_boxes, N, self.d_model).permute(1, 0, 2).reshape(1, N * nr_boxes, self.d_model)
+        pro_features2 = self.inst_interact(pro_features, roi_features)  # 动态卷积
+        pro_features = pro_features + self.dropout2(pro_features2)  # 残差连接
+        obj_features = self.norm2(pro_features)
+
+        # obj_feature. 多层感知机（MLP），用于提取更高级别的特征。可学习
+        obj_features2 = self.linear2(self.dropout(self.activation(self.linear1(obj_features))))
+        obj_features = obj_features + self.dropout3(obj_features2)
+        obj_features = self.norm3(obj_features)  # (1,1500,256)可学习的意义特征，用于下一轮次的训练。
 
         fc_feature = obj_features.transpose(0, 1).reshape(N * nr_boxes, -1)  # 碾平为一维(1500 256)
 
@@ -560,10 +620,9 @@ class RCNNHead(nn.Module):
             reg_feature = reg_layer(reg_feature)
         class_logits = self.class_logits(cls_feature)  # 预测类别
         bboxes_deltas = self.bboxes_delta(reg_feature)  # 预测边界框偏移
-        pred_bboxes = self.apply_deltas(bboxes_deltas, bboxes.view(-1, 4))  # 计算最终的预测边界框，用于下一步的自细化阶段。
+        pred_bboxes = self.apply_deltas(bboxes_deltas, bboxes.view(-1, 4))  # 计算最终的预测边界框，用于下一轮的增强。
 
         return class_logits.view(N, nr_boxes, -1), pred_bboxes.view(N, nr_boxes, -1), obj_features
-
     def apply_deltas(self, deltas, boxes):
         """
         Apply transformation `deltas` (dx, dy, dw, dh) to `boxes`.
@@ -623,7 +682,7 @@ class RCNNHead_cond(RCNNHead):
             self.c_mlp = nn.Sequential(nn.SiLU(), nn.Linear(d_model, d_model))
 
     def forward(self, features, bboxes, pro_features, pooler, time_emb, cond=None):
-        """ 对应论文中的最后一个模块，条件精炼 Conditioned Refinement
+        """ 对应论文中的最后一个模块，融合全局语义特征
         :param bboxes: (N, nr_boxes, 4)
         :param pro_features: (N, nr_boxes, d_model)
         """
@@ -685,6 +744,68 @@ class RCNNHead_cond(RCNNHead):
 
         return class_logits.view(N, nr_boxes, -1), pred_bboxes.view(N, nr_boxes, -1), obj_features
 
+    def forward2(self, features, bboxes, pro_features, pooler, time_emb, cond=None):
+        """ 对应论文中的最后一个模块，融合全局语义特征
+        :param bboxes: (N, nr_boxes, 4)
+        :param pro_features: (N, nr_boxes, d_model)
+        """
+
+        N, nr_boxes = bboxes.shape[:2]
+
+        # roi_feature.
+        proposal_boxes = list()
+        for b in range(N):
+            proposal_boxes.append(Boxes(bboxes[b]))
+        roi_features = pooler(features, proposal_boxes)
+
+        if pro_features is None:
+            pro_features = roi_features.view(N, nr_boxes, self.d_model, -1).mean(-1)
+
+        roi_features = roi_features.view(N * nr_boxes, self.d_model, -1).permute(2, 0, 1)
+
+        # self_att.
+        roi_features = roi_features.view(N, nr_boxes, self.d_model).permute(1, 0, 2)  # 调整维度
+        roi_features2 = self.self_attn(roi_features, roi_features, value=roi_features)[0]  # 进行自注意力操作
+        roi_features = roi_features + self.dropout1(roi_features2)  # 残差连接，避免过拟合
+        roi_features = self.norm1(roi_features)  # 层归一化  (300,5,256*49)
+
+        # inst_interact. 动态卷积
+        pro_features = pro_features.view(nr_boxes, N, self.d_model).permute(1, 0, 2).reshape(1, N * nr_boxes, self.d_model)
+        pro_features2 = self.inst_interact(pro_features, roi_features)
+        pro_features = pro_features + self.dropout2(pro_features2)
+        obj_features = self.norm2(pro_features)
+
+        # obj_feature.
+        obj_features2 = self.linear2(self.dropout(self.activation(self.linear1(obj_features))))
+        obj_features = obj_features + self.dropout3(obj_features2)
+        obj_features = self.norm3(obj_features)
+
+        fc_feature = obj_features.transpose(0, 1).reshape(N * nr_boxes, -1)
+
+        # 区别RCNNHead：这里在Scale和Shift处增加了cond。
+        if self.adaptive_norm:
+            shift = self.c_mlp(cond)
+            scale = self.block_time_mlp(time_emb)
+            scale = torch.repeat_interleave(scale, nr_boxes, dim=0)
+            fc_feature = fc_feature * (scale + 1) + shift
+        else:
+            scale_shift = self.block_time_mlp(time_emb)
+            scale_shift = torch.repeat_interleave(scale_shift, nr_boxes, dim=0)
+            scale, shift = scale_shift.chunk(2, dim=1)
+            fc_feature = fc_feature * (scale + 1) + shift
+
+        # Decoder
+        cls_feature = fc_feature.clone()
+        reg_feature = fc_feature.clone()
+        for cls_layer in self.cls_module:
+            cls_feature = cls_layer(cls_feature)
+        for reg_layer in self.reg_module:
+            reg_feature = reg_layer(reg_feature)
+        class_logits = self.class_logits(cls_feature)
+        bboxes_deltas = self.bboxes_delta(reg_feature)
+        pred_bboxes = self.apply_deltas(bboxes_deltas, bboxes.view(-1, 4))
+
+        return class_logits.view(N, nr_boxes, -1), pred_bboxes.view(N, nr_boxes, -1), obj_features
 class DynamicConv(nn.Module):
 
     def __init__(self, cfg):
@@ -708,8 +829,8 @@ class DynamicConv(nn.Module):
 
     def forward(self, pro_features, roi_features):
         '''
-        pro_features: (1,  N * nr_boxes, self.d_model)
-        roi_features: (49, N * nr_boxes, self.d_model)
+        pro_features: (1,  N * nr_boxes, self.d_model) (1,600,256)
+        roi_features: (49, N * nr_boxes, self.d_model) (49,600,256)
         '''
         features = roi_features.permute(1, 0, 2) # (N * nr_boxes, 49, 256)
         parameters = self.dynamic_layer(pro_features).permute(1, 0, 2) # (N * nrboxes , 1, 2*256*64)

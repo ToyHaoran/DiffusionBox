@@ -42,6 +42,7 @@ from torch.cuda.amp import autocast, GradScaler
 
 def train(cfg, local_rank, distributed):
     model = build_detection_model(cfg)  # 创建模型并将其移动到指定设备cuda
+
     device = torch.device(cfg.MODEL.DEVICE)
     model.to(device)
 
@@ -79,6 +80,11 @@ def train(cfg, local_rank, distributed):
 
     if not cfg.MODEL.VID.IGNORE:  # 如果没有忽略视频检测相关的部分，更新参数字典
         arguments.update(extra_checkpoint_data)
+
+    # 计算模型参数量
+    total = sum([param.nelement() for param in model.parameters()])
+    print("模型参数量：Number of parameter: %.2fM" % (total / 1e6))
+
     # 加载数据，速度稍慢
     data_loader = make_data_loader(
         cfg,

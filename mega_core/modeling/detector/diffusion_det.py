@@ -343,14 +343,14 @@ class DiffusionDet(nn.Module):
             return self._forward_test(images["cur"], infos, targets)
 
     def _forward_train(self, img_cur, imgs_l, imgs_m, imgs_g, targets):
-        # 将输入的当前帧与参考帧的图像和目标合并
+        # 将输入的当前帧与参考帧的图像和目标合并，一起提取特征
         targets, targets_g, targets_l = targets
         targets = targets + targets_l + targets_g
 
         num_imgs = 1 + len(imgs_l) + len(imgs_g)
         imgs_all = torch.cat([img_cur.tensors, *[img.tensors for img in imgs_l], *[img.tensors for img in imgs_g]], dim=0)
 
-        # 使用模型的骨干网络resnet101提取特征p3 p4 p5 p6，分辨率越来越小，对应论文公式7
+        # 使用模型的骨干网络resnet101提取特征p3 p4 p5 p6，分辨率越来越小，对应论文 训练过程中的提取特征那一部分。
         features_dict = self.backbone(imgs_all)
         features = list()
         for p in self.in_features:  # 选择p3 p4 p5进入ROI_HEADS
@@ -766,13 +766,13 @@ class DiffusionDet(nn.Module):
         t = torch.randint(0, self.num_timesteps, (1,), device=self.device).long()  # 随机时间步
         noise = torch.randn(self.num_proposals, 4, device=self.device)
 
-        num_gt = gt_boxes.shape[0]
+        num_gt = gt_boxes.shape[0]  # gt框数目
         # 如果没有真实边界框，生成一个假的边界框
         if not num_gt:
             gt_boxes = torch.as_tensor([[0.5, 0.5, 1., 1.]], dtype=torch.float, device=self.device)
             num_gt = 1
 
-        # 如果真实框数量小于提议的数量
+        # 将边界框数量(GT框)填充到固定数量N。填充策略：选择遵循高斯分布的随机框。
         if num_gt < self.num_proposals:
             box_placeholder = torch.randn(self.num_proposals - num_gt, 4,
                                           device=self.device) / 6. + 0.5  # 3sigma = 1/2 --> sigma: 1/6
@@ -787,7 +787,7 @@ class DiffusionDet(nn.Module):
 
         x_start = (x_start * 2. - 1.) * self.scale
 
-        # 执行扩散过程，生成扩散后的边界框
+        # 执行前向加噪过程，生成扩散后的边界框
         # noise sample ( a(t) * signal + (1-a(t)) + noise, a is cosine func )
         x = self.q_sample(x_start=x_start, t=t, noise=noise)
 

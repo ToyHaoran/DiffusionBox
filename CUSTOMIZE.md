@@ -1,9 +1,10 @@
 # Customize
 
 This file will give a brief introduction for:
- - How to prepare your own datasets for training with provided methods.
- - How to implement your own fascinating method.
- 
+
+- How to prepare your own datasets for training with provided methods.
+- How to implement your own fascinating method.
+
 ## Prepare your own dataset
 
 We would fist give some notations.
@@ -47,7 +48,7 @@ datasets
 |   |── annotation
 |   |   |   |── train
 |   |   |   |── val
-``` 
+```
 
 Following this structure, your could directly use all provided methods with only minor modification on the dataloader, which will be introduced later.
 
@@ -75,7 +76,7 @@ Once you have done the above steps, the dataset and the dataloader needs to be a
 
 Modify the `configs/BASE_RCNN_Xgpu.yaml` to make it compatible with the statistics of your dataset, e.g., the `NUM_CLASSES`.
 
-## Implement your own method 
+## Implement your own method
 
 First give your method a fancy name, so suppose your method's name is `fancy` here.
 
@@ -83,17 +84,17 @@ First give your method a fancy name, so suppose your method's name is `fancy` he
 
 Create a new dataloader under folder `data/dataset`, it should be inherited from the `VIDEODataset` class. You only need to make a minor modification on `__init__()` method (see [`vid_fgfa.py`](mega_core/data/datasets/vid_fgfa.py) for example) and implement `_get_train()` and `_get_test()` method.
 
-As video object detection methods usually require some reference frames to assist the detection on current frame. We recommend that the current frame should be stored in `images["cur"]` and all reference frames be stored in `images["ref"]` as a list. This will make the following batch collating procedure easier. But it all depends on you. see [`vid_fgfa.py`](mega_core/data/datasets/vid_fgfa.py) for a example. 
+As video object detection methods usually require some reference frames to assist the detection on current frame. We recommend that the current frame should be stored in `images["cur"]` and all reference frames be stored in `images["ref"]` as a list. This will make the following batch collating procedure easier. But it all depends on you. see [`vid_fgfa.py`](mega_core/data/datasets/vid_fgfa.py) for a example.
 
 Once you have created your dataloader, it needs to be added in a couple of places:
+
 - [`mega_core/data/collate_batch.py`](mega_core/data/collate_batch.py): add your method name `fancy` in the `if` clause in `BatchCollator.__call__()`. And modify the processing step to make it compatible with your dataloader behavior.
 - [`mega_core/data/datasets/__init__.py`](mega_core/data/datasets/__init__.py): add the dataloader to `__all__`.
 - [`mega_core/config/paths_catalog.py`](mega_core/config/paths_catalog.py): add corresponding `if` clause in `DatasetCatalog.get()` to access your method.
 
-
 ### Prepare your model
 
-Create your model under directory `mega_core/modeling/detector` and register it in [`mega_core/modeling/detector/detectors.py`](mega_core/modeling/detector/detectors.py). Take [`mega_core/modeling/detector/generalized_rcnn_mega.py`](mega_core/modeling/detector/generalized_rcnn_mega.py) and the corresponding config files as reference if you use new submodules in your model. 
+Create your model under directory `mega_core/modeling/detector` and register it in [`mega_core/modeling/detector/detectors.py`](mega_core/modeling/detector/detectors.py). Take [`mega_core/modeling/detector/generalized_rcnn_mega.py`](mega_core/modeling/detector/generalized_rcnn_mega.py) and the corresponding config files as reference if you use new submodules in your model.
 
 ### Register your method
 
