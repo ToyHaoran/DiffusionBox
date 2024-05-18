@@ -402,7 +402,7 @@ class DynamicHead(nn.Module):
                     attn_ = attn_ * mask
                 attn_ = attn_.reshape(-1, dim)
 
-            # 遍历 RCNNHead_cond，对应论文中最后条件细化模块 Conditioned Refinement。attn_表示论文中的cond。
+            # 遍历 RCNNHead_cond，对应论文中聚合全局语义特征。attn_表示论文中的cond。
             for head_idx, rcnn_head_local in enumerate(self.head_series_cond):
                 self.use_topk = False  # TODO 为什么这里代码不可达？不过在下面用到了rcnn_head_local
                 if self.use_topk:  # attention score
