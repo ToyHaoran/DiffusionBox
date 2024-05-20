@@ -291,8 +291,9 @@ class DynamicHead(nn.Module):
                 proposal_features = None
 
             # self frame feature generation task
-            # 遍历head序列中的3个RCNNHead，对应论文中的三个自增强模块
+            # 遍历head序列中的3个RCNNHead，对应论文中的三个语义增强模块
             for head_idx, rcnn_head in enumerate(self.head_series):
+                # 预测的类别、预测的边界框(可用于提取语义特征)、可学习特征(用来增强预测的精度)。后两者会迭代多个轮次。
                 class_logits, pred_bboxes, proposal_features = rcnn_head(features, bboxes, proposal_features, self.box_pooler, time)
                 if self.return_intermediate and self.training:  # 是否需要中间结果，保存类别和边界框结果。
                     inter_class_logits.append(class_logits)  # [key_frame].unsqueeze(0))  # fast train
@@ -302,7 +303,7 @@ class DynamicHead(nn.Module):
             # skip 0~2 stage
             class_logits, bboxes, proposal_features = self.proposals_feat_cur.pop()
 
-        # 对应论文中的构建核心集 Constructing Core-Set 中的黄色块 核心集选择
+        # 对应论文中的全局语义信息构建。
         if self.training or box_extract > 0:
             # 选择每一帧中类别得分最高的top K个局部框(local boxes)对应的特征。
             # class_logits (8,500,30) 预测的类别，class_logits_max是每个样本(500个框)在最后一个维度上的最大值(8,500)
@@ -545,7 +546,7 @@ class RCNNHead(nn.Module):
 
         fc_feature = obj_features.transpose(0, 1).reshape(N * nr_boxes, -1)  # 碾平为一维(1500 256)
 
-        # 对应论文中扩散模型的反向传播
+        # 对应论文中对时间步
         scale_shift = self.block_time_mlp(time_emb)  # 通过时间多层感知机（MLP）获得一个尺度和偏移的参数。
         scale_shift = torch.repeat_interleave(scale_shift, nr_boxes, dim=0)  # 将时间信息的尺度和偏移参数进行复制，以适应每个边框。
         scale, shift = scale_shift.chunk(2, dim=1)  # 将尺度和偏移参数分成两部分。

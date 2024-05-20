@@ -785,6 +785,7 @@ class DiffusionDet(nn.Module):
         else:
             x_start = gt_boxes
 
+        # 将x_start的坐标值进行缩放和平移，以控制加噪的强度
         x_start = (x_start * 2. - 1.) * self.scale
 
         # 执行前向加噪过程，生成扩散后的边界框
