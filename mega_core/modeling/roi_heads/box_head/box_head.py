@@ -291,7 +291,7 @@ class DynamicHead(nn.Module):
                 proposal_features = None
 
             # self frame feature generation task
-            # 遍历head序列中的3个RCNNHead，对应论文中的三个语义增强模块
+            # 遍历head序列中的3个RCNNHead，对应论文中的语义特征渐进增强模块
             for head_idx, rcnn_head in enumerate(self.head_series):
                 # 预测的类别、预测的边界框(可用于提取语义特征)、可学习特征(用来增强预测的精度)。后两者会迭代多个轮次。
                 class_logits, pred_bboxes, proposal_features = rcnn_head(features, bboxes, proposal_features, self.box_pooler, time)
@@ -306,7 +306,7 @@ class DynamicHead(nn.Module):
         # 对应论文中的全局语义信息构建。
         if self.training or box_extract > 0:
             # 选择每一帧中类别得分最高的top K个局部框(local boxes)对应的特征。
-            # class_logits (8,500,30) 预测的类别，class_logits_max是每个样本(500个框)在最后一个维度上的最大值(8,500)
+            # class_logits (8,500,30) 预测类别，class_logits_max是每个样本(500个框)在最后一个维度上的最大值(8,500) _表示最大值的索引
             class_logits_max, _ = torch.max(input=class_logits, dim=-1, keepdim=False)
             topk_val, topk_idx = class_logits_max.topk(k=self.top_k[0], dim=-1)  # 选择类别得分最高的前K=75个 值、框的idx。都是(8,75)
             # 创建布尔掩码，并将idx处的值设置为true (8,500)，用于提取对应框 对应的特征proposal_feat_frame[topk_idx_bool]
@@ -320,7 +320,7 @@ class DynamicHead(nn.Module):
                 return [class_logits, bboxes, proposal_features], \
                         proposal_feat_frame[topk_idx_bool], proposal_feat_frame[topk_idx_bool2]  # , bboxes[topk_idx_bool].view(bboxes.size(0), k, 4).detach()
 
-        # local attention task  是否进行局部和全局注意力，是构建核心数据集C 黄色块 核心集选择的一部分。
+        # local attention task  是否进行局部和全局注意力
         if self.local_enable or self.global_enable:
             #  为局部和全局的注意力机制准备相应的输入
             #features_cur = [p[key_frame].unsqueeze(0) for p in features]
@@ -328,6 +328,7 @@ class DynamicHead(nn.Module):
             if self.training:  #
                 local_interval = 3 if self.local_enable else 1  # 局部注意力的间隔
                 if self.local_enable:
+                    # 其实没有什么用，都是随机框，用什么局部帧？
                     local_proposals = proposal_feat_frame[:local_interval]  # 从 proposal features 中提取局部间隔内的部分。
                     local_topk_idx_bool = topk_idx_bool[:local_interval]
                     local_kv_ = local_proposals[local_topk_idx_bool].unsqueeze(1)  # all: proposal_features.permute(1, 0, 2)
