@@ -941,7 +941,7 @@ def update_erase_memory(feats_new=None, feats_mem=None, rois_new=None, rois_mem=
     else:
         raise NotImplementedError
 
-    result_feat = merged_feat[idx_to_be_remained]  # 留下900个最好的特征 (900,256)
+    result_feat = merged_feat[idx_to_be_remained]
 
     if rois_new is not None:
         merged_rois_list = torch.cat([rois_mem, rois_new], dim=0)
@@ -967,6 +967,7 @@ def select_farthest_k_greedy_cuda(merged_feat: torch.Tensor, k: int) -> torch.Te
 
     #cos = nn.CosineSimilarity(dim=1, eps=1e-6)
     #cos_sim = cos(merged_feat.repeat_interleave(len(merged_feat), dim=0), merged_feat.repeat(len(merged_feat), 1))
+
     ##distance = 1 - cos_sim.view(len(merged_feat), len(merged_feat))
     #distance = cos_sim.arccos().view(len(merged_feat), len(merged_feat))  # Angular distance
 

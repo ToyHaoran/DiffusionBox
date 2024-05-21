@@ -303,17 +303,19 @@ class DynamicHead(nn.Module):
             # skip 0~2 stage
             class_logits, bboxes, proposal_features = self.proposals_feat_cur.pop()
 
-        # 对应论文中的全局语义信息构建。
+        # 对应论文中的全局最优语义特征模块的构建。
         if self.training or box_extract > 0:
             # 选择每一帧中类别得分最高的top K个局部框(local boxes)对应的特征。
             # class_logits (8,500,30) 预测类别，class_logits_max是每个样本(500个框)在最后一个维度上的最大值(8,500) _表示最大值的索引
             class_logits_max, _ = torch.max(input=class_logits, dim=-1, keepdim=False)
-            topk_val, topk_idx = class_logits_max.topk(k=self.top_k[0], dim=-1)  # 选择类别得分最高的前K=75个 值、框的idx。都是(8,75)
+            # 选择类别得分最高的前K=75个 值、框的idx。都是(8,75)
+            topk_val, topk_idx = class_logits_max.topk(k=self.top_k[0], dim=-1)
             # 创建布尔掩码，并将idx处的值设置为true (8,500)，用于提取对应框 对应的特征proposal_feat_frame[topk_idx_bool]
             topk_idx_bool = torch.zeros_like(class_logits_max, dtype=torch.bool)
             topk_idx_bool.scatter_(1, topk_idx, 1)
             topk_idx_bool2 = torch.zeros_like(class_logits_max, dtype=torch.bool)
-            topk_idx_bool2.scatter_(1, topk_idx[:, :self.top_k[1]], 1)  # 在前75个中再次选择前25个
+            # 在前75个中再次选择前25个
+            topk_idx_bool2.scatter_(1, topk_idx[:, :self.top_k[1]], 1)
 
             if box_extract > 0:  # 是否进行框提取
                 proposal_feat_frame = proposal_features.view([-1, num_boxes, dim])
@@ -322,20 +324,24 @@ class DynamicHead(nn.Module):
 
         # local attention task  是否进行局部和全局注意力
         if self.local_enable or self.global_enable:
-            #  为局部和全局的注意力机制准备相应的输入
+            #  为局部和全局的注意力机制准备相应的输入，将前面的可学习特征拿来。
             #features_cur = [p[key_frame].unsqueeze(0) for p in features]
             proposal_feat_frame = proposal_features.view([-1, num_boxes, dim])
             if self.training:  #
                 local_interval = 3 if self.local_enable else 1  # 局部注意力的间隔
                 if self.local_enable:
-                    # 其实没有什么用，都是随机框，用什么局部帧？
+                    # 其实没有什么用，都是随机框，和语义特征，用什么局部帧？这里直接关闭局部帧。
                     local_proposals = proposal_feat_frame[:local_interval]  # 从 proposal features 中提取局部间隔内的部分。
                     local_topk_idx_bool = topk_idx_bool[:local_interval]
                     local_kv_ = local_proposals[local_topk_idx_bool].unsqueeze(1)  # all: proposal_features.permute(1, 0, 2)
                 if self.global_enable:
                     global_proposals = proposal_feat_frame[local_interval:]  # 从 proposal features 中提取全局部分。
                     global_topk_idx_bool = topk_idx_bool[local_interval:]  # 从 top-k 索引中提取全局部分。
-                    global_kv1_ = global_proposals[global_topk_idx_bool].unsqueeze(1)
+                    # 从(N_候选框数量,300,256)选择(300,)对应位置为True的行，组成新的数组返回，即(N,75,256)
+                    # 对应论文中选择每帧中类别得分最高的topK个可学习特征
+                    global_proposals = global_proposals[global_topk_idx_bool]
+                    global_kv1_ = global_proposals.unsqueeze(1)
+                    # 没有必要更精细了。
                     #global_topk_idx_bool2 = topk_idx_bool2[local_interval:]
                     #global_kv2_ = global_proposals[global_topk_idx_bool2].unsqueeze(1)
                     global_kv_ = [global_kv1_, global_kv1_]
@@ -346,25 +352,26 @@ class DynamicHead(nn.Module):
 
             # 调整query_的格式，即z_i
             if self.training and self.local_enable:
+                # 训练时，不可达，因为我们使用的是随机框，并且是语义特征，因此我们不开启局部帧聚合。
                 query_ = local_proposals.view(local_interval * num_boxes, 1, dim)  # [local_interval * num_boxes, 1, 256]
                 bboxes2 = bboxes[:local_interval]
                 class_logits2 = class_logits[:local_interval]
                 features = [f[:local_interval] for f in features]
                 time = time[:local_interval]
-            elif True:
-                # enhance cur batch features
-                query_ = proposal_features.permute(1, 0, 2)
-                bboxes2 = bboxes
-                class_logits2 = class_logits
             else:
+                # 准备语义特征对应的边界框，增强当前批次的语义特征，query_是可学习特征e^R
+                query_ = proposal_features.permute(1, 0, 2)
+                bboxes2 = bboxes  # 用来提取语义特征z^R
+                class_logits2 = class_logits  # 对应的类别预测
+
                 # enhance cur single features
-                query_ = proposal_feat_frame[key_frame].unsqueeze(1)
-                bboxes2 = bboxes[key_frame].unsqueeze(0)  # bboxes[topk_idx_bool].view(pred_bboxes.size(0), k, 4).detach()
-                features = features_cur
-                time = time[key_frame].unsqueeze(0)
+                # query_ = proposal_feat_frame[key_frame].unsqueeze(1)
+                # bboxes2 = bboxes[key_frame].unsqueeze(0)  # bboxes[topk_idx_bool].view(pred_bboxes.size(0), k, 4).detach()
+                # features = features_cur
+                # time = time[key_frame].unsqueeze(0)
 
             # 循环应用不同的局部和全局注意力机制，更新查询 query_ 和其他相关变量。
-            # local box-level attention  遍历局部注意力机制列表
+            # local box-level attention  遍历局部注意力机制列表(跳过)
             for i in range(len(self.local_attention)):
                 local_attn, dropout, layer_norm = self.local_attention[i]
                 attn_ = local_attn(query=query_, key=local_kv_[i], value=local_kv_[i])[0]
@@ -375,8 +382,7 @@ class DynamicHead(nn.Module):
                 query_ = torch.cat([query_, global_kv_[1]], dim=0)
             for i in range(len(self.global_attention)):
                 if self.adaptive_norm:
-                    # 就是多头注意力机制，对应论文中的蓝色框，其中Q V是从z_i^S的线性变换导出的，K是从核心集C的线性变换导出的。 TODO 怎么和论文不一致？
-                    # 这里的query_表示z_i，global_kv_表示核心集C
+                    # 这里的query_表示e^R，global_kv_表示e_topK，
                     global_attn = self.global_attention[i][0]  # 进行全局注意力
                     attn_ = global_attn(query=query_, key=global_kv_[i], value=global_kv_[i])[0]
                 else:
@@ -406,7 +412,7 @@ class DynamicHead(nn.Module):
 
             # 遍历 RCNNHead_cond，对应论文中聚合全局语义特征。attn_表示论文中的cond。
             for head_idx, rcnn_head_local in enumerate(self.head_series_cond):
-                self.use_topk = False  # TODO 为什么这里代码不可达？不过在下面用到了rcnn_head_local
+                self.use_topk = False
                 if self.use_topk:  # attention score
                     if head_idx == 0:
                         k_level = [150, 75, 75]
@@ -426,7 +432,7 @@ class DynamicHead(nn.Module):
                         query_ = query_.view(-1, num_boxes, dim)[topk_idx_bool].unsqueeze(1)
                         bboxes2 = bboxes2[topk_idx_bool].view(-1, k_level[head_idx] + low_k, 4)
                         attn_ = attn_.view(-1, num_boxes, dim)[topk_idx_bool]
-                # proposal_features2对应论文中最后条件细化模块的输入z_i
+                # proposal_features2对应论文中最后融合模块的输入
                 proposal_features2 = query_.permute(1, 0, 2)
                 # 通过rcnn_head_local网络 进行前向传播，得到局部注意力下的类别分数、预测边界框和建议特征。
                 # attn_表示论文中的cond
