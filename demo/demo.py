@@ -2,6 +2,16 @@ import glob
 import os
 import argparse
 
+# 参数
+# configs/vid_R101.yaml
+# models/mymodel_R101.pth
+# --suffix
+# ".JPEG"
+# --visualize-path
+# datasets/ILSVRC2015/Data/VID/val/ILSVRC2015_val_00022000
+# --output-folder
+# visualization
+
 from mega_core.config import cfg
 from predictor import VIDDemo
 
