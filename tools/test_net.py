@@ -27,7 +27,6 @@ from mega_core.modeling.detector.diffusion_det import add_diffusiondet_config
 
 
 def main():
-    print("llll")
     #os.environ["CUDA_LAUNCH_BLOCKING"] = "1"  # for debugging
     parser = argparse.ArgumentParser(description="PyTorch Object Detection Inference")
     parser.add_argument(
