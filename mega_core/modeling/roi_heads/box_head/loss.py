@@ -469,36 +469,42 @@ class SetCriterionDynamicK(nn.Module):
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
+        # 去除辅助损失，用于计算主要损失
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
-        # Retrieve the matching between the outputs of the last layer and the targets
+        # 检索最后一层的输出与目标之间的匹配。得到 indices(匹配结果)
         indices, _ = self.matcher(outputs_without_aux, targets)
 
-        # Compute the average number of target boxes accross all nodes, for normalization purposes
+        # 计算所有节点上目标框的平均数量，用于归一化目的。
         num_boxes = sum(len(t["labels"]) for t in targets)
         num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
 
-        # Compute all the requested losses
+        # 计算所有请求的损失：调用get_loss方法计算损失，并将其结果更新到losses字典中。
         losses = {}
         for loss in self.losses:
             losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
 
+        # 处理辅助损失：对每个中间层的输出重复上述损失计算过程。
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                # 对于每个辅助输出层，再次进行输出和目标的匹配，并计算所有请求的损失。
                 indices, _ = self.matcher(aux_outputs, targets)
                 for loss in self.losses:
+                    # 对于损失类型为 masks 的情况，由于计算成本过高，会被忽略。
                     if loss == 'masks':
                         # Intermediate masks losses are too costly to compute, we ignore them.
                         continue
                     kwargs = {}
+                    # 对于损失类型为 labels 的情况，只有最后一层会启用日志记录。
                     if loss == 'labels':
                         # Logging is enabled only for the last layer
                         kwargs = {'log': False}
                     l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
+                    # 计算得到的损失字典中的每个键名都会加上当前层的索引，以区分不同层的损失。
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
@@ -510,6 +516,9 @@ class HungarianMatcherDynamicK(nn.Module):
     For efficiency reasons, the targets don't include the no_object. Because of this, in general,
     there are more predictions than targets. In this case, we do a 1-to-k (dynamic) matching of the best predictions,
     while the others are un-matched (and thus treated as non-objects).
+    此类计算目标和网络预测之间的分配。出于效率原因，目标不包括no_object。
+    正因为如此，一般来说，预测多于目标。
+    在这种情况下，我们对最佳预测进行 1-to-k（动态）匹配，而其他预测则不匹配（因此被视为非对象）。
     """
     def __init__(self, cfg, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1, cost_mask: float = 1, use_focal: bool = False):
         """Creates the matcher
@@ -535,17 +544,20 @@ class HungarianMatcherDynamicK(nn.Module):
         with torch.no_grad():
             bs, num_queries = outputs["pred_logits"].shape[:2]
             # We flatten to compute the cost matrices in a batch
+            # 获取 outputs 中预测的类别概率和边界框坐标，根据配置选择使用 sigmoid 或 softmax 激活函数处理类别概率。
             if self.use_focal or self.use_fed_loss:
                 out_prob = outputs["pred_logits"].sigmoid()  # [batch_size, num_queries, num_classes]
                 out_bbox = outputs["pred_boxes"]  # [batch_size,  num_queries, 4]
             else:
                 out_prob = outputs["pred_logits"].softmax(-1)  # [batch_size, num_queries, num_classes]
                 out_bbox = outputs["pred_boxes"]  # [batch_size, num_queries, 4]
-
+            # 用于存储每个batch的匹配结果和匹配的查询索引。
             indices = []
             matched_ids = []
             assert bs == len(targets)
-            for batch_idx in range(bs):  # TODO DEBUG一下
+            # 遍历每个批次，获取预测的边界框和类别概率，以及目标的标签和边界框。
+            # 如果目标是空的，则跳过当前批次并继续处理下一个批次。
+            for batch_idx in range(bs):
                 bz_boxes = out_bbox[batch_idx]   # [500, 4]  预测的绝对坐标：xyxy
                 bz_out_prob = out_prob[batch_idx]  # [500, 30] 预测类别
                 bz_tgt_ids = targets[batch_idx]["labels"] - 1
@@ -557,19 +569,20 @@ class HungarianMatcherDynamicK(nn.Module):
                     indices.append(indices_batchi)
                     matched_ids.append(matched_qidx)
                     continue
-
+                # 计算匹配信息：获取归一化后的目标边界框和绝对坐标。
                 bz_gtboxs = targets[batch_idx]['boxes']  # [num_gt, 4] 归一化的 (cx, xy, w, h)
                 bz_gtboxs_abs_xyxy = targets[batch_idx]['boxes_xyxy']
+                # 获取前景掩码和中心区域掩码。
                 fg_mask, is_in_boxes_and_center = self.get_in_boxes_info(
                     box_xyxy_to_cxcywh(bz_boxes),  # absolute (cx, cy, w, h)
                     box_xyxy_to_cxcywh(bz_gtboxs_abs_xyxy),  # absolute (cx, cy, w, h)
                     expanded_strides=32
                 )
-
-                # IOU函数
+                # 计算预测框与目标框之间的IOU。
                 pair_wise_ious = ops.box_iou(bz_boxes, bz_gtboxs_abs_xyxy)
 
                 # Compute the classification cost.
+                # 根据配置计算分类成本（Focal Loss, Fed Loss 或 Softmax 损失）。
                 if self.use_focal:
                     alpha = self.focal_loss_alpha
                     gamma = self.focal_loss_gamma
@@ -589,20 +602,20 @@ class HungarianMatcherDynamicK(nn.Module):
                 # image_size_out = image_size_out.unsqueeze(1).repeat(1, num_queries, 1).flatten(0, 1)
                 # image_size_tgt = torch.cat([v["image_size_xyxy_tgt"] for v in targets])
 
+                # 计算边界框和 GIoU 成本：归一化预测框和目标框，计算 L1 成本和 GIoU 成本。
                 bz_image_size_out = targets[batch_idx]['image_size_xyxy']  # ['image_size_xyxy_pred']
                 bz_image_size_tgt = targets[batch_idx]['image_size_xyxy_tgt']
-
                 bz_out_bbox_ = bz_boxes / bz_image_size_out  # normalize (x1, y1, x2, y2)
                 bz_tgt_bbox_ = bz_gtboxs_abs_xyxy / bz_image_size_tgt  # normalize (x1, y1, x2, y2)
                 cost_bbox = torch.cdist(bz_out_bbox_, bz_tgt_bbox_, p=1)
-
                 cost_giou = -generalized_box_iou(bz_boxes, bz_gtboxs_abs_xyxy)
 
-                # Final cost matrix
+                # 计算最终成本矩阵并匹配：计算最终成本矩阵，考虑分类成本、边界框成本、GIoU 成本以及中心区域掩码。
                 cost = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou + 100.0 * (~is_in_boxes_and_center)
                 # cost = (cost_class + 3.0 * cost_giou + 100.0 * (~is_in_boxes_and_center))  # [num_query,num_gt]
                 cost[~fg_mask] = cost[~fg_mask] + 10000.0
 
+                # 调用 self.dynamic_k_matching 方法进行动态 K 匹配，获取匹配结果并存储。
                 # if bz_gtboxs.shape[0]>0:
                 indices_batchi, matched_qidx = self.dynamic_k_matching(cost, pair_wise_ious, bz_gtboxs.shape[0])
 
